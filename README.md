@@ -7,7 +7,7 @@ using Nelson-Siegel based models and machine learning methods.
 
 ## Models
 
-### 1. Dynamic Nelson-Siegel Models 
+### 1. Dynamic Nelson-Siegel and Rotated Nelson-Siegel Model
 
 The first Python script implements the Dynamic Nelson-Siegel (DNS) and Rotated Nelson-Siegel (RDNS)
 model for yield curve estimation and forecasting. Different forecasting approaches are applied to the estimated factors, including ARIMA and VARMA models, both with and without macroeconomic factors.
