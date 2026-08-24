@@ -40,7 +40,7 @@ The models are evaluated for:
 
 Forecasting performance is evaluated using:
 
-- Root Mean Squared Error (RMSE)
+- Root Mean Squared Error (RMSE) and Diebold–Mariano tests
 
 The predicted yield curves are compared with the actual yield curve.
 
