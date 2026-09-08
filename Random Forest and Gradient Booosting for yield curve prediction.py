@@ -46,8 +46,7 @@ def create_features_target(data, target_horizon=1):
 
         current_yields = data.iloc[i].values
         current_date = dates[i]
-        year = current_date.year
-        features = np.concatenate([current_yields, [year]])
+        features = current_yields
         X_list.append(features)
         y_list.append(data.iloc[i + target_horizon].values)
 
@@ -175,7 +174,7 @@ grid_results_xgb["Std_CV_RMSE"] = grid_results_xgb["std_test_score"]
 
 # Random Forest Feature Importance
 
-feature_names = list(maturity_cols) + ["year"]
+feature_names = list(maturity_cols) 
 
 importances = rf.feature_importances_
 importance_df = pd.DataFrame({
@@ -213,7 +212,7 @@ print("\n" + "=" * 80)
 print("FEATURE IMPORTANCE GRADIENT BOOSTING")
 print("=" * 80)
 
-feature_names = list(maturity_cols) + ['year']
+feature_names = list(maturity_cols) 
 importances = xgb_best.feature_importances_
 
 importance_df = pd.DataFrame({
@@ -249,9 +248,9 @@ current_date = pd.Timestamp('2023-06-01 00:00:00')
 predictions_xgb = {}
 
 for step, future_date in enumerate(target_dates, start=1):
-    year = current_date.year
-    features = np.concatenate([current_yields, [year]]).reshape(1, -1)
-
+    
+    features = current_yields.reshape(1, -1)
+    
     next_yields = xgb_best.predict(features)[0]
     predictions_xgb[future_date] = next_yields
 
@@ -294,10 +293,8 @@ predictions = {}
 for step, future_date in enumerate(target_dates, start=1):
 
     month = current_date.month
-    year = current_date.year
 
-    features = np.concatenate([current_yields, [year]]).reshape(1, -1)
-
+    features = current_yields.reshape(1, -1)
     next_yields = rf.predict(features)[0]
 
     predictions[future_date] = next_yields
@@ -309,9 +306,6 @@ for step, future_date in enumerate(target_dates, start=1):
 july_2023_pred = predictions.get(pd.Timestamp('2023-07-01'))
 dec_2023_pred = predictions.get(pd.Timestamp('2023-12-01'))
 
-# ----------------------------
-# 5. Prikaz rezultata
-# ----------------------------
 print("\n" + "="*60)
 print("Random forest")
 print("="*60)
@@ -327,11 +321,7 @@ if dec_2023_pred is not None:
         print(f" {dec_2023_pred[i]:.6f}")
 
 
-import pandas as pd
 
-# ----------------------------
-# Gradient Boosting / XGBoost
-# ----------------------------
 
 gb_july_df = pd.DataFrame({
     "Ročnost": maturity_cols,
@@ -359,11 +349,6 @@ with pd.ExcelWriter("gradient_boosting_predictions.xlsx", engine="openpyxl") as 
 
 print("Gradient Boosting results are saved in gradient_boosting_predictions.xlsx")
 
-
-# ----------------------------
-# Random Forest
-# ----------------------------
-
 rf_july_df = pd.DataFrame({
     "Ročnost": maturity_cols,
     "Random_Forest": july_2023_pred
@@ -374,7 +359,6 @@ rf_dec_df = pd.DataFrame({
     "Random_Forest": dec_2023_pred
 })
 
-# Čuvanje u Excel
 with pd.ExcelWriter("random_forest_predictions.xlsx", engine="openpyxl") as writer:
     rf_july_df.to_excel(
         writer,
@@ -441,9 +425,7 @@ def recursive_forecast_path( model,initial_yields,origin_period, max_horizon ):
 
         # Isti skup atributa kao u funkciji create_features_target:
         # 16 prinosa + godina tekućeg meseca
-        features = np.concatenate(
-            [current_yields, [current_period.year]]
-        ).reshape(1, -1)
+        features = current_yields.reshape(1, -1)
 
         next_yields = np.asarray(
             model.predict(features),
@@ -459,7 +441,6 @@ def recursive_forecast_path( model,initial_yields,origin_period, max_horizon ):
 
         forecasts.append(next_yields.copy())
 
-        # Prognozirana kriva postaje ulaz za sledeći korak
         current_yields = next_yields
         current_period = current_period + 1
 
@@ -539,8 +520,6 @@ def expanding_window_backtest(
         origin_date = data.index[origin_index]
         origin_period = periods[origin_index]
 
-        # Trening skup sadrži samo podatke dostupne
-        # zaključno sa forecast origin-om.
         training_data = data.iloc[:origin_index + 1]
 
         X_train, y_train, _ = create_features_target(
@@ -551,7 +530,6 @@ def expanding_window_backtest(
         if len(X_train) == 0:
             continue
 
-        # Nova kopija modela za svaki forecast origin
         rf_model = clone(rf_model_template)
         xgb_model = clone(xgb_model_template)
 
@@ -614,8 +592,7 @@ def expanding_window_backtest(
                 f"{origin_date.strftime('%Y-%m')} "
                 f"({counter}/{total_origins})"
             )
-
-    # Pretvaranje listi u matrice
+            
     for horizon in horizons:
 
         if len(results[horizon]["dates"]) == 0:
@@ -679,19 +656,15 @@ def modified_dm_test(
     mean_differential = np.mean(differential)
     centered = differential - mean_differential
 
-    # Kod preklapajućih h-step prognoza koriste se zaostaci
-    # do h - 1.
     max_lag = min(
         forecast_horizon - 1,
         sample_size - 1
     )
 
-    # Autokovarijansa reda 0
     long_run_variance = (
         np.dot(centered, centered) / sample_size
     )
 
-    # Newey-West/Bartlett ponderi
     for lag in range(1, max_lag + 1):
 
         autocovariance = (
@@ -729,7 +702,6 @@ def modified_dm_test(
         / np.sqrt(variance_of_mean)
     )
 
-    # Harvey-Leybourne-Newbold korekcija
     h = forecast_horizon
     correction_term = (
         sample_size
@@ -765,9 +737,6 @@ def modified_dm_test(
 # 5. HOLM KOREKCIJA ZA 16 POJEDINAČNIH TESTOVA
 # -------------------------------------------------------------------------
 def holm_adjustment(p_values):
-    """
-    Ručno izračunavanje Holm-korigovanih p-vrednosti.
-    """
 
     p_values = np.asarray(p_values, dtype=float)
     number_of_tests = len(p_values)
@@ -818,7 +787,6 @@ def evaluate_dm_results(
     error_rf = actual - rf_prediction
     error_xgb = actual - xgb_prediction
 
-    # Ukupni RMSE preko svih datuma i svih 16 ročnosti
     overall_rmse_rf = np.sqrt(
         np.mean(error_rf ** 2)
     )
@@ -827,8 +795,6 @@ def evaluate_dm_results(
         np.mean(error_xgb ** 2)
     )
 
-    # Za svaki datum formira se jedna vrednost gubitka
-    # kao prosečna kvadratna greška preko svih 16 ročnosti.
     curve_loss_rf = np.mean(
         error_rf ** 2,
         axis=1
@@ -873,9 +839,6 @@ def evaluate_dm_results(
         "Conclusion": curve_conclusion
     }
 
-    # -------------------------------------------------------------
-    # Test po pojedinačnim ročnostima
-    # -------------------------------------------------------------
     maturity_rows = []
 
     for maturity_index, maturity_name in enumerate(maturity_names):
@@ -930,14 +893,6 @@ def evaluate_dm_results(
     maturity_table["Significantly_better_model"] = conclusions
 
     return summary, maturity_table
-
-
-# -------------------------------------------------------------------------
-# 7. POKRETANJE BACKTEST-A
-# -------------------------------------------------------------------------
-# Januar 2018. je samo predlog.
-# Možeš promeniti period, ali treba ostaviti dovoljno prognoza za DM test.
-
 
 backtest_results = expanding_window_backtest(
     data=df,
@@ -1011,8 +966,6 @@ for horizon in (1, 6):
         )
     )
 
-
-# Sažeta tabela za celu krivu
 dm_summary_df = pd.DataFrame(summary_rows)
 
 print("\n" + "=" * 80)
