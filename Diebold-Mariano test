@@ -1,0 +1,1740 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+from google.colab import files
+uploaded = files.upload()
+#RANDOM FOREST
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error
+import warnings
+warnings.filterwarnings('ignore')
+
+file_path = "dataML.xlsx"
+df = pd.read_excel(file_path, engine='openpyxl')
+
+# Prva kolona su datumi (verovatno naziv 'date' ili slično)
+date_col = df.columns[0]
+df[date_col] = pd.to_datetime(df[date_col], format='%d.%m.%Y', dayfirst=True)
+df.set_index(date_col, inplace=True)
+
+# Kolone od B do Q su ročnosti: 3m, 6m, ..., 120m
+# maturity_cols = df.columns  # pretpostavka da su sve preostale kolone ročnosti
+maturity_cols = df.columns
+
+# Zamena decimalne zapete sa tačkom i konverzija u float (ako je potrebno)
+df = df.apply(lambda x: x.astype(str).str.replace(',', '.').astype(float))
+# print("data, df: ", df)
+# Sortiranje po datumu
+df.sort_index(inplace=True)
+
+
+def create_features_target(data, target_horizon=1):
+    """
+    data: DataFrame sa datumskim indeksom i prinosima za svaku ročnost
+    target_horizon: za koliko meseci unapred predviđamo (1 = sledeći mesec)
+    """
+    X_list = []
+    y_list = []
+    dates = data.index
+
+    for i in range(len(data) - target_horizon):
+        # Karakteristike iz tekućeg meseca
+        current_yields = data.iloc[i].values
+
+        # Vremenske karakteristike za tekući mesec
+        current_date = dates[i]
+        year = current_date.year
+
+        # month = current_date.month
+        # Ciklično kodiranje meseca (sin/cos)
+        # month_sin = np.sin(2 * np.pi * month / 12)
+        # month_cos = np.cos(2 * np.pi * month / 12)
+
+        features =current_yields
+        X_list.append(features)
+
+        # Target: prinosi za target_horizon meseci unapred
+        y_list.append(data.iloc[i + target_horizon].values)
+
+    return np.array(X_list), np.array(y_list), dates
+
+X, y, dates_used = create_features_target(df, target_horizon=1)
+
+last_known_date = df.index[-1]  # jun 2023.
+last_known_yields = df.iloc[-1].values
+
+rf = RandomForestRegressor(
+    n_estimators=100,
+    max_depth=5,
+    max_features="sqrt",
+    max_samples=0.8,
+    min_samples_leaf=2,
+    min_samples_split=2,
+    criterion="squared_error",
+    bootstrap=True,
+    random_state=42,
+    n_jobs=-1
+)
+
+rf.fit(X, y)
+
+# XGBOOST - finalni model sa najboljim parametrima iz Grid Search-a
+
+import xgboost as xgb
+
+print("FAZA 2: XGBOOST - FINALNI MODEL SA NAJBOLJIM PARAMETRIMA")
+print("=" * 80)
+
+xgb_best = xgb.XGBRegressor(
+    objective="reg:squarederror",
+    multi_strategy="multi_output_tree",
+    tree_method="hist",
+    device="cpu",
+    random_state=42,
+    n_jobs=-1,
+
+    # Najbolji parametri dobijeni Grid Search postupkom
+    n_estimators=500,
+    max_depth=1,
+    learning_rate=0.05,
+    min_child_weight=3,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=0.5,
+    reg_alpha=0.01
+)
+
+
+xgb_best.fit(X, y)
+
+
+print("\n" + "=" * 80)
+print("REKURZIVNO PREDVIĐANJE: XGBOOST (JUL-DECEMBAR 2023)")
+print("=" * 80)
+target_dates = pd.date_range(start='2023-07-01', end='2023-12-01', freq='MS')
+# Ako želite samo jul i decembar, izdvojite ih:
+target_dates_jul_dec = [pd.Timestamp('2023-07-01'), pd.Timestamp('2023-12-01')]
+
+current_yields = last_known_yields.copy()
+current_date = pd.Timestamp('2023-06-01 00:00:00')
+predictions_xgb = {}
+
+for step, future_date in enumerate(target_dates, start=1):
+    year = current_date.year
+    features = current_yields.reshape(1, -1)
+
+    next_yields = xgb_best.predict(features)[0]
+    predictions_xgb[future_date] = next_yields
+
+    current_yields = next_yields
+    current_date = future_date
+
+july_2023_xgb = predictions_xgb.get(pd.Timestamp('2023-07-01'))
+dec_2023_xgb = predictions_xgb.get(pd.Timestamp('2023-12-01'))
+
+print(f"\n✓ XGBoost predviđanja kreirana")
+print(f"  Jul 2023 (1-step ahead): ✓")
+print(f"  Dec 2023 (6-step ahead): ✓")
+
+
+# ============================================================================
+# 9. PRIKAZ REZULTATA - JUL 2023
+# ============================================================================
+
+print("\n" + "=" * 80)
+print("PREDVIĐENE KRIVE PRINOSA - JUL 2023 (1-STEP AHEAD)")
+print("=" * 80)
+
+print(f"\n{'Ročnost':<15} {'Random Forest':<20} {'XGBoost':<20} {'Razlika':<15}")
+print("-" * 70)
+
+for i, col in enumerate(maturity_cols):
+    xgb_val = july_2023_xgb[i]
+    print(f"{col:<15} {xgb_val:>19.6f} ")
+
+# ============================================================================
+# 10. PRIKAZ REZULTATA - DECEMBAR 2023
+# ============================================================================
+
+print("\n" + "=" * 80)
+print("PREDVIĐENE KRIVE PRINOSA - DECEMBAR 2023 (6-STEP AHEAD, REKURZIVNO)")
+print("=" * 80)
+
+print(f"\n{'Ročnost':<15} {'Random Forest':<20} {'XGBoost':<20} {'Razlika':<15}")
+print("-" * 70)
+
+for i, col in enumerate(maturity_cols):
+    xgb_val = dec_2023_xgb[i]
+    print(f"{col:<15}  {xgb_val:>19.6f} ")
+
+
+
+# Definišemo mesece koje želimo da predvidimo
+#target dates sadrzi sve mesece
+target_dates = pd.date_range(start='2023-07-01', end='2023-12-01', freq='MS')
+# Ako želite samo jul i decembar, izdvojite ih:
+target_dates_jul_dec = [pd.Timestamp('2023-07-01'), pd.Timestamp('2023-12-01')]
+
+# Rekurzivno predviđanje korak po korak
+current_yields = last_known_yields.copy()
+# current_date = last_known_date
+current_date = pd.Timestamp('2023-06-01 00:00:00')
+predictions = {}  # {datum: predviđeni prinosi}
+print(current_date)
+
+# Predviđamo za svaki mesec od jula do decembra
+for step, future_date in enumerate(target_dates, start=1):
+    print(step)
+    # Karakteristike za tekući mesec (current_date)
+    month = current_date.month
+    year = current_date.year
+
+    features = current_yields.reshape(1, -1)
+
+    # Predviđanje za naredni mesec
+    next_yields = rf.predict(features)[0]
+
+    # Čuvamo predviđanje za ovaj budući datum
+    predictions[future_date] = next_yields
+
+    # Ažuriramo za sledeći korak
+    current_yields = next_yields
+    current_date = future_date
+
+# Izdvajamo samo jul i decembar
+july_2023_pred = predictions.get(pd.Timestamp('2023-07-01'))
+dec_2023_pred = predictions.get(pd.Timestamp('2023-12-01'))
+
+# ----------------------------
+# 5. Prikaz rezultata
+# ----------------------------
+print("\n" + "="*60)
+print("PREDVIĐENE KRIVE PRINOSA")
+print("="*60)
+
+if july_2023_pred is not None:
+    print("\n📅 Jul 2023.")
+    for i, col in enumerate(maturity_cols):
+        print(f"{col}: {july_2023_pred[i]:.6f}")
+
+if dec_2023_pred is not None:
+    print("\n📅 Decembar 2023.")
+    for i, col in enumerate(maturity_cols):
+        print(f"{col}: {dec_2023_pred[i]:.6f}")
+
+# Opciono: uporedi sa stvarnim vrednostima ako postoje (npr. ako fajl sadrži i kasnije podatke)
+# (u vašem slučaju nema, jer fajl staje u junu 2023.)
+
+# ----------------------------
+# 6. (Dodatno) Čuvanje predviđanja u Excel fajl
+# ----------------------------
+results_df = pd.DataFrame({
+    'Maturity': maturity_cols,
+    'Jul_2023_pred': july_2023_pred if july_2023_pred is not None else np.nan,
+    'Dec_2023_pred': dec_2023_pred if dec_2023_pred is not None else np.nan
+})
+
+print(maturity_cols)
+print(july_2023_pred)
+
+results_df = pd.DataFrame({
+    'Maturity': maturity_cols,
+    'Jul_2023_pred': july_2023_pred ,
+    'Dec_2023_pred': dec_2023_pred
+})
+results_df.to_excel("random_forest_predictions_2023.xlsx", index=False)
+print("\n✅ Predviđanja su sačuvana u fajl: random_forest_predictions_2023.xlsx")
+
+pred_file = "random_forest_predictions_2023.xlsx"
+pred_df = pd.read_excel(pred_file)
+# Pretpostavka: kolone su 'Maturity', 'Jul_2023_pred', 'Dec_2023_pred'
+maturity_cols = pred_df['Maturity'].values
+july_pred = pred_df['Jul_2023_pred'].values
+test6s_file = "testML.xlsx"   # pretpostavljeni naziv fajla
+
+df = pd.read_excel(test6s_file, engine='openpyxl')
+# print(df.values)
+print(pred_df['Dec_2023_pred'].values)
+
+# =============================================================================
+# DIEBOLD-MARIANO TEST:
+# RANDOM FOREST VS XGBOOST
+# EXPANDING-WINDOW PSEUDO-OUT-OF-SAMPLE EVALUATION
+# =============================================================================
+
+file_path = "dataML.xlsx"
+df = pd.read_excel(file_path, engine='openpyxl')
+
+# Prva kolona su datumi (verovatno naziv 'date' ili slično)
+date_col = df.columns[0]
+df[date_col] = pd.to_datetime(df[date_col], format='%d.%m.%Y', dayfirst=True)
+df.set_index(date_col, inplace=True)
+
+# Kolone od B do Q su ročnosti: 3m, 6m, ..., 120m
+# maturity_cols = df.columns  # pretpostavka da su sve preostale kolone ročnosti
+maturity_cols = df.columns
+
+# Zamena decimalne zapete sa tačkom i konverzija u float (ako je potrebno)
+df = df.apply(lambda x: x.astype(str).str.replace(',', '.').astype(float))
+
+from sklearn.base import clone
+from scipy.stats import t as student_t
+
+
+rf_selected = globals().get("rf_best", globals().get("rf", None))
+
+if rf_selected is None:
+    raise NameError(
+        "Random Forest model nije pronađen. "
+        "Postavi rf_selected = rf ili rf_selected = rf_best."
+    )
+
+if "xgb_best" not in globals():
+    raise NameError(
+        "XGBoost model xgb_best nije pronađen."
+    )
+
+# Kreiraju se šabloni modela. U svakom istorijskom trenutku biće formirana nova, nefitujuća kopija.
+
+rf_template = clone(rf_selected)
+xgb_template = clone(xgb_best)
+
+# Paralelizacija unutar pojedinačnih modela
+rf_template.set_params(n_jobs=-1)
+xgb_template.set_params(n_jobs=-1)
+
+
+# -------------------------------------------------------------------------
+# 2. REKURZIVNA PROGNOZA IZ JEDNOG FORECAST ORIGIN-A
+# -------------------------------------------------------------------------
+def recursive_forecast_path( model,initial_yields,origin_period, max_horizon ):
+    """
+    Formira rekurzivne prognoze od 1 do max_horizon meseci unapred.
+
+    model:
+        Već procenjen RF ili XGBoost model.
+
+    initial_yields:
+        Poznata kriva prinosa u forecast origin-u.
+
+    origin_period:
+        Mesec poslednje poznate krive, kao pandas Period.
+
+    max_horizon:
+        Maksimalan broj rekurzivnih koraka.
+
+    Povratna vrednost:
+        Lista prognoziranih krivih.
+        Element 0 predstavlja h=1, element 5 predstavlja h=6.
+    """
+
+    current_yields = np.asarray(
+        initial_yields,
+        dtype=float
+    ).copy()
+
+    current_period = origin_period
+    forecasts = []
+
+    for step in range(1, max_horizon + 1):
+
+        # Isti skup atributa kao u funkciji create_features_target:
+        # 16 prinosa + godina tekućeg meseca
+        features = current_yields.reshape(1, -1)
+
+        next_yields = np.asarray(
+            model.predict(features),
+            dtype=float
+        ).reshape(-1)
+
+        if next_yields.size != len(initial_yields):
+            raise ValueError(
+                "Model nije vratio očekivani broj prinosa. "
+                f"Očekivano: {len(initial_yields)}, "
+                f"dobijeno: {next_yields.size}."
+            )
+
+        forecasts.append(next_yields.copy())
+
+        # Prognozirana kriva postaje ulaz za sledeći korak
+        current_yields = next_yields
+        current_period = current_period + 1
+
+    return forecasts
+
+
+# -------------------------------------------------------------------------
+# 3. EXPANDING-WINDOW BACKTEST
+# -------------------------------------------------------------------------
+def expanding_window_backtest(
+    data,
+    rf_model_template,
+    xgb_model_template,
+    horizons=(1, 6),
+    evaluation_start="2018-01",
+    verbose=True
+):
+    """
+    Sprovodi pseudo-out-of-sample evaluaciju sa rastućim trening skupom.
+
+    Za svaki forecast origin:
+      1. Koriste se samo podaci dostupni do tog datuma.
+      2. Ponovo se procenjuju RF i XGBoost.
+      3. Generišu se rekurzivne prognoze.
+      4. Prognoze se porede sa stvarnim vrednostima.
+
+    horizons:
+        Prognozni horizonti koji se analiziraju, npr. (1, 6).
+
+    evaluation_start:
+        Prvi ciljni mesec uključen u evaluaciju.
+    """
+
+    data = data.copy()
+    data = data.sort_index()
+    data = data.astype(float)
+
+    if data.isna().any().any():
+        raise ValueError(
+            "Podaci sadrže nedostajuće vrednosti. "
+            "Potrebno ih je obraditi pre backtest postupka."
+        )
+
+    horizons = tuple(sorted(set(horizons)))
+
+    if any(h < 1 for h in horizons):
+        raise ValueError("Svi prognozni horizonti moraju biti pozitivni.")
+
+    max_horizon = max(horizons)
+
+    periods = data.index.to_period("M")
+    evaluation_start_period = pd.Period(
+        evaluation_start,
+        freq="M"
+    )
+
+    eligible_targets = np.flatnonzero(
+        periods >= evaluation_start_period
+    )
+
+    if len(eligible_targets) == 0:
+        raise ValueError(
+            "Izabrani početak evaluacije nije prisutan u podacima."
+        )
+
+    first_target_index = int(eligible_targets[0])
+
+    # Za h=6 prvi forecast origin mora biti šest meseci
+    # pre prvog ciljnog datuma.
+    first_origin_index = max(
+        1,
+        first_target_index - max_horizon
+    )
+
+    results = {
+        h: {
+            "dates": [],
+            "actual": [],
+            "rf": [],
+            "xgb": []
+        }
+        for h in horizons
+    }
+
+    total_origins = len(data) - 1 - first_origin_index
+
+    for counter, origin_index in enumerate(
+        range(first_origin_index, len(data) - 1),
+        start=1
+    ):
+
+        origin_date = data.index[origin_index]
+        origin_period = periods[origin_index]
+
+        # Trening skup sadrži samo podatke dostupne
+        # zaključno sa forecast origin-om.
+        training_data = data.iloc[:origin_index + 1]
+
+        X_train, y_train, _ = create_features_target(
+            training_data,
+            target_horizon=1
+        )
+
+        if len(X_train) == 0:
+            continue
+
+        # Nova kopija modela za svaki forecast origin
+        rf_model = clone(rf_model_template)
+        xgb_model = clone(xgb_model_template)
+
+        rf_model.fit(X_train, y_train)
+        xgb_model.fit(X_train, y_train)
+
+        available_horizon = min(
+            max_horizon,
+            len(data) - 1 - origin_index
+        )
+
+        rf_path = recursive_forecast_path(
+            model=rf_model,
+            initial_yields=data.iloc[origin_index].values,
+            origin_period=origin_period,
+            max_horizon=available_horizon
+        )
+
+        xgb_path = recursive_forecast_path(
+            model=xgb_model,
+            initial_yields=data.iloc[origin_index].values,
+            origin_period=origin_period,
+            max_horizon=available_horizon
+        )
+
+        for horizon in horizons:
+
+            if horizon > available_horizon:
+                continue
+
+            target_index = origin_index + horizon
+            target_period = periods[target_index]
+
+            if target_period < evaluation_start_period:
+                continue
+
+            results[horizon]["dates"].append(
+                data.index[target_index]
+            )
+
+            results[horizon]["actual"].append(
+                data.iloc[target_index].values.astype(float)
+            )
+
+            results[horizon]["rf"].append(
+                rf_path[horizon - 1]
+            )
+
+            results[horizon]["xgb"].append(
+                xgb_path[horizon - 1]
+            )
+
+        if verbose and (
+            counter == 1
+            or counter % 12 == 0
+            or counter == total_origins
+        ):
+            print(
+                f"Obrađen forecast origin: "
+                f"{origin_date.strftime('%Y-%m')} "
+                f"({counter}/{total_origins})"
+            )
+
+    # Pretvaranje listi u matrice
+    for horizon in horizons:
+
+        if len(results[horizon]["dates"]) == 0:
+            raise ValueError(
+                f"Nisu formirane prognoze za horizont h={horizon}."
+            )
+
+        results[horizon]["dates"] = pd.DatetimeIndex(
+            results[horizon]["dates"]
+        )
+
+        results[horizon]["actual"] = np.vstack(
+            results[horizon]["actual"]
+        )
+
+        results[horizon]["rf"] = np.vstack(
+            results[horizon]["rf"]
+        )
+
+        results[horizon]["xgb"] = np.vstack(
+            results[horizon]["xgb"]
+        )
+
+    return results
+
+
+# -------------------------------------------------------------------------
+# 4. MODIFIKOVANI DIEBOLD-MARIANO TEST
+# -------------------------------------------------------------------------
+def modified_dm_test(
+    loss_rf,
+    loss_xgb,
+    forecast_horizon=1
+):
+    """
+    Modifikovani Diebold-Mariano test sa:
+
+      - razlikom gubitaka: d_t = Loss_RF - Loss_XGB
+      - Newey-West/Bartlett procenom dugoročne varijanse
+      - Harvey-Leybourne-Newbold korekcijom za mali uzorak
+
+    Interpretacija znaka:
+      DM > 0  -> XGBoost ima manji prosečan gubitak
+      DM < 0  -> Random Forest ima manji prosečan gubitak
+    """
+
+    loss_rf = np.asarray(loss_rf, dtype=float)
+    loss_xgb = np.asarray(loss_xgb, dtype=float)
+
+    if loss_rf.shape != loss_xgb.shape:
+        raise ValueError(
+            "Nizovi gubitaka moraju imati istu dužinu."
+        )
+
+    valid = (
+        np.isfinite(loss_rf)
+        & np.isfinite(loss_xgb)
+    )
+
+    loss_rf = loss_rf[valid]
+    loss_xgb = loss_xgb[valid]
+
+    differential = loss_rf - loss_xgb
+    sample_size = len(differential)
+
+    if sample_size <= forecast_horizon + 2:
+        raise ValueError(
+            "Broj out-of-sample prognoza je premali "
+            "za izabrani prognozni horizont."
+        )
+
+    mean_differential = np.mean(differential)
+    centered = differential - mean_differential
+
+    # Kod preklapajućih h-step prognoza koriste se zaostaci
+    # do h - 1.
+    max_lag = min(
+        forecast_horizon - 1,
+        sample_size - 1
+    )
+
+    # Autokovarijansa reda 0
+    long_run_variance = (
+        np.dot(centered, centered) / sample_size
+    )
+
+    # Newey-West/Bartlett ponderi
+    for lag in range(1, max_lag + 1):
+
+        autocovariance = (
+            np.dot(
+                centered[lag:],
+                centered[:-lag]
+            )
+            / sample_size
+        )
+
+        bartlett_weight = (
+            1.0 - lag / (max_lag + 1.0)
+        )
+
+        long_run_variance += (
+            2.0
+            * bartlett_weight
+            * autocovariance
+        )
+
+    if long_run_variance <= 0:
+        return {
+            "dm_statistic": np.nan,
+            "p_value": np.nan,
+            "mean_loss_difference": mean_differential,
+            "n_forecasts": sample_size
+        }
+
+    variance_of_mean = (
+        long_run_variance / sample_size
+    )
+
+    dm_original = (
+        mean_differential
+        / np.sqrt(variance_of_mean)
+    )
+
+    # Harvey-Leybourne-Newbold korekcija
+    h = forecast_horizon
+    correction_term = (
+        sample_size
+        + 1
+        - 2 * h
+        + h * (h - 1) / sample_size
+    ) / sample_size
+
+    if correction_term <= 0:
+        raise ValueError(
+            "HLN korekcija nije definisana za dati broj prognoza."
+        )
+
+    dm_corrected = (
+        dm_original
+        * np.sqrt(correction_term)
+    )
+
+    p_value = 2.0 * student_t.sf(
+        np.abs(dm_corrected),
+        df=sample_size - 1
+    )
+
+    return {
+        "dm_statistic": dm_corrected,
+        "p_value": p_value,
+        "mean_loss_difference": mean_differential,
+        "n_forecasts": sample_size
+    }
+
+
+# -------------------------------------------------------------------------
+# 5. HOLM KOREKCIJA ZA 16 POJEDINAČNIH TESTOVA
+# -------------------------------------------------------------------------
+def holm_adjustment(p_values):
+    """
+    Ručno izračunavanje Holm-korigovanih p-vrednosti.
+    """
+
+    p_values = np.asarray(p_values, dtype=float)
+    number_of_tests = len(p_values)
+
+    order = np.argsort(p_values)
+    adjusted = np.empty(number_of_tests)
+
+    previous_adjusted = 0.0
+
+    for rank, original_index in enumerate(order):
+
+        multiplier = number_of_tests - rank
+
+        current_adjusted = min(
+            multiplier * p_values[original_index],
+            1.0
+        )
+
+        current_adjusted = max(
+            current_adjusted,
+            previous_adjusted
+        )
+
+        adjusted[original_index] = current_adjusted
+        previous_adjusted = current_adjusted
+
+    return adjusted
+
+
+# -------------------------------------------------------------------------
+# 6. EVALUACIJA CELE KRIVE I POJEDINAČNIH ROČNOSTI
+# -------------------------------------------------------------------------
+def evaluate_dm_results(
+    backtest_result,
+    horizon,
+    maturity_names
+):
+    """
+    Sprovodi:
+      1. DM test za celu krivu;
+      2. DM test za svaku ročnost posebno.
+    """
+
+    actual = backtest_result["actual"]
+    rf_prediction = backtest_result["rf"]
+    xgb_prediction = backtest_result["xgb"]
+
+    error_rf = actual - rf_prediction
+    error_xgb = actual - xgb_prediction
+
+    # Ukupni RMSE preko svih datuma i svih 16 ročnosti
+    overall_rmse_rf = np.sqrt(
+        np.mean(error_rf ** 2)
+    )
+
+    overall_rmse_xgb = np.sqrt(
+        np.mean(error_xgb ** 2)
+    )
+
+    # Za svaki datum formira se jedna vrednost gubitka
+    # kao prosečna kvadratna greška preko svih 16 ročnosti.
+    curve_loss_rf = np.mean(
+        error_rf ** 2,
+        axis=1
+    )
+
+    curve_loss_xgb = np.mean(
+        error_xgb ** 2,
+        axis=1
+    )
+
+    curve_dm = modified_dm_test(
+        loss_rf=curve_loss_rf,
+        loss_xgb=curve_loss_xgb,
+        forecast_horizon=horizon
+    )
+
+    if np.isnan(curve_dm["p_value"]):
+        curve_conclusion = "Test statistic could not be calculated"
+
+    elif curve_dm["p_value"] >= 0.05:
+        curve_conclusion = (
+            "No statistically significant difference"
+        )
+
+    elif curve_dm["dm_statistic"] > 0:
+        curve_conclusion = (
+            "XGBoost has significantly lower forecast loss"
+        )
+
+    else:
+        curve_conclusion = (
+            "Random Forest has significantly lower forecast loss"
+        )
+
+    summary = {
+        "Horizon": horizon,
+        "Number_of_forecasts": len(actual),
+        "RF_RMSE": overall_rmse_rf,
+        "XGBoost_RMSE": overall_rmse_xgb,
+        "DM_statistic": curve_dm["dm_statistic"],
+        "DM_p_value": curve_dm["p_value"],
+        "Conclusion": curve_conclusion
+    }
+
+    # -------------------------------------------------------------
+    # Test po pojedinačnim ročnostima
+    # -------------------------------------------------------------
+    maturity_rows = []
+
+    for maturity_index, maturity_name in enumerate(maturity_names):
+
+        loss_rf_maturity = (
+            error_rf[:, maturity_index] ** 2
+        )
+
+        loss_xgb_maturity = (
+            error_xgb[:, maturity_index] ** 2
+        )
+
+        maturity_dm = modified_dm_test(
+            loss_rf=loss_rf_maturity,
+            loss_xgb=loss_xgb_maturity,
+            forecast_horizon=horizon
+        )
+
+        maturity_rows.append({
+            "Maturity": maturity_name,
+            "RF_RMSE": np.sqrt(
+                np.mean(loss_rf_maturity)
+            ),
+            "XGBoost_RMSE": np.sqrt(
+                np.mean(loss_xgb_maturity)
+            ),
+            "DM_statistic": maturity_dm["dm_statistic"],
+            "p_value_raw": maturity_dm["p_value"]
+        })
+
+    maturity_table = pd.DataFrame(maturity_rows)
+
+    maturity_table["p_value_Holm"] = holm_adjustment(
+        maturity_table["p_value_raw"].values
+    )
+
+    conclusions = []
+
+    for _, row in maturity_table.iterrows():
+
+        if row["p_value_Holm"] >= 0.05:
+            conclusion = "No significant difference"
+
+        elif row["DM_statistic"] > 0:
+            conclusion = "XGBoost"
+
+        else:
+            conclusion = "Random Forest"
+
+        conclusions.append(conclusion)
+
+    maturity_table["Significantly_better_model"] = conclusions
+
+    return summary, maturity_table
+
+
+# -------------------------------------------------------------------------
+# 7. POKRETANJE BACKTEST-A
+# -------------------------------------------------------------------------
+# Januar 2018. je samo predlog.
+# Možeš promeniti period, ali treba ostaviti dovoljno prognoza za DM test.
+
+print("BROJ KOLONA U DF:", len(df.columns))
+print("KOLONE:", list(df.columns))
+print("BROJ MATURITY KOLONA:", len(maturity_cols))
+
+backtest_results = expanding_window_backtest(
+    data=df,
+    rf_model_template=rf_template,
+    xgb_model_template=xgb_template,
+    horizons=(1, 6),
+    evaluation_start="2018-01",
+    verbose=True
+)
+
+
+# -------------------------------------------------------------------------
+# 8. DM REZULTATI ZA h=1 I h=6
+# -------------------------------------------------------------------------
+summary_rows = []
+maturity_dm_tables = {}
+
+for horizon in (1, 6):
+
+    summary, maturity_table = evaluate_dm_results(
+        backtest_result=backtest_results[horizon],
+        horizon=horizon,
+        maturity_names=list(maturity_cols)
+    )
+
+    summary_rows.append(summary)
+    maturity_dm_tables[horizon] = maturity_table
+
+    print("\n" + "=" * 80)
+    print(
+        f"DIEBOLD-MARIANO TEST: "
+        f"RANDOM FOREST VS XGBOOST, h={horizon}"
+    )
+    print("=" * 80)
+
+    print(
+        f"Broj prognoza: "
+        f"{summary['Number_of_forecasts']}"
+    )
+
+    print(
+        f"Random Forest RMSE: "
+        f"{summary['RF_RMSE']:.6f}"
+    )
+
+    print(
+        f"XGBoost RMSE: "
+        f"{summary['XGBoost_RMSE']:.6f}"
+    )
+
+    print(
+        f"DM statistika: "
+        f"{summary['DM_statistic']:.6f}"
+    )
+
+    print(
+        f"p-vrednost: "
+        f"{summary['DM_p_value']:.6f}"
+    )
+
+    print(
+        f"Zaključak: "
+        f"{summary['Conclusion']}"
+    )
+
+    print("\nRezultati po ročnostima:")
+    print(
+        maturity_table.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.6f}"
+        )
+    )
+
+
+# Sažeta tabela za celu krivu
+dm_summary_df = pd.DataFrame(summary_rows)
+
+print("\n" + "=" * 80)
+print("SAŽETAK DM TESTA ZA CELU KRIVU")
+print("=" * 80)
+
+print(
+    dm_summary_df.to_string(
+        index=False,
+        float_format=lambda value: f"{value:.6f}"
+    )
+)
+
+
+with pd.ExcelWriter(
+    "DM_RF_vs_XGBoost_results.xlsx",
+    engine="openpyxl"
+) as writer:
+
+    dm_summary_df.to_excel(
+        writer,
+        sheet_name="Whole_curve",
+        index=False
+    )
+
+    maturity_dm_tables[1].to_excel(
+        writer,
+        sheet_name="Maturities_h1",
+        index=False
+    )
+
+    maturity_dm_tables[6].to_excel(
+        writer,
+        sheet_name="Maturities_h6",
+        index=False
+    )
+
+print(
+    "\nRezultati su sačuvani u fajlu "
+    "'DM_RF_vs_XGBoost_results.xlsx'."
+)
+
+
+# =============================================================================
+# DIEBOLD-MARIANO TEST:
+# RANDOM FOREST VS RDNS I XGBOOST VS RDNS
+# =============================================================================
+
+from pathlib import Path
+
+
+# RDNS fajl treba da bude u istom folderu iz kog se pokrece skripta
+# (npr. Colab nakon files.upload()), ili u Downloads folderu na lokalnom racunaru.
+rdns_forecast_matches = []
+
+for candidate in [
+    Path("RDNS_expanding_window_66_forecasts.xlsx"),
+    Path("RDNS_expanding_window_66_forecasts (1).xlsx"),
+    Path(r"C:\Users\Aleksa.Krunic\Downloads\RDNS_expanding_window_66_forecasts.xlsx"),
+    Path(r"C:\Users\Aleksa.Krunic\Downloads\RDNS_expanding_window_66_forecasts (1).xlsx"),
+]:
+    if candidate.exists() and candidate not in rdns_forecast_matches:
+        rdns_forecast_matches.append(candidate)
+
+for candidate in sorted(
+    Path(".").glob("RDNS_expanding_window_66_forecasts*.xlsx")
+):
+    if candidate.exists() and candidate not in rdns_forecast_matches:
+        rdns_forecast_matches.append(candidate)
+
+if len(rdns_forecast_matches) == 0:
+    raise FileNotFoundError(
+        "Nije pronadjen fajl 'RDNS_expanding_window_66_forecasts.xlsx'. "
+        "Uploaduj ga u radni folder ili promeni putanju u promenljivoj "
+        "rdns_forecast_file."
+    )
+
+rdns_forecast_file = rdns_forecast_matches[0]
+
+print(
+    "\nKoristi se RDNS forecast fajl: "
+    f"{rdns_forecast_file}"
+)
+
+
+def _normalise_column_name(column_name):
+    """
+    Normalizuje nazive kolona samo za pronalazenje obaveznih polja.
+    """
+
+    return (
+        str(column_name)
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+    )
+
+
+def _maturity_key(column_name):
+    """
+    Pretvara nazive rocnosti u zajednicki oblik, npr. 3, 3.0 i '3m' -> '3m'.
+    """
+
+    text = str(column_name).strip().lower().replace(" ", "")
+
+    try:
+        numeric_value = float(text)
+
+        if numeric_value.is_integer():
+            return f"{int(numeric_value)}m"
+
+    except ValueError:
+        pass
+
+    return text
+
+
+def _find_required_column(columns, accepted_names):
+    """
+    Pronalazi kolonu nezavisno od razmaka, donjih crta i velikih/malih slova.
+    """
+
+    accepted_keys = {
+        _normalise_column_name(name)
+        for name in accepted_names
+    }
+
+    for column in columns:
+
+        if _normalise_column_name(column) in accepted_keys:
+            return column
+
+    raise KeyError(
+        "Nedostaje jedna od obaveznih kolona: "
+        f"{accepted_names}."
+    )
+
+
+def _to_month_start(values, label):
+    """
+    Pretvara datume u prvi dan meseca kako bi poredjenje bilo mesecno.
+    """
+
+    raw_values = pd.Series(
+        list(values)
+    )
+
+    parsed_dates = pd.to_datetime(
+        raw_values,
+        errors="coerce"
+    )
+
+    raw_text = raw_values.astype(str).str.strip()
+
+    dayfirst_mask = raw_text.str.match(
+        r"^\d{1,2}[./]\d{1,2}[./]\d{2,4}$"
+    )
+
+    if dayfirst_mask.any():
+        parsed_dates.loc[dayfirst_mask] = pd.to_datetime(
+            raw_values.loc[dayfirst_mask],
+            errors="coerce",
+            dayfirst=True
+        )
+
+    missing_mask = parsed_dates.isna()
+
+    if missing_mask.any():
+        parsed_dates.loc[missing_mask] = pd.to_datetime(
+            raw_values.loc[missing_mask],
+            errors="coerce",
+            dayfirst=True
+        )
+
+    if parsed_dates.isna().any():
+        raise ValueError(
+            f"Kolona {label} sadrzi datume koje nije moguce parsirati."
+        )
+
+    return pd.DatetimeIndex(
+        parsed_dates
+    ).to_period("M").to_timestamp()
+
+
+def load_rdns_forecast_sheet(
+    file_path,
+    sheet_name,
+    maturity_names
+):
+    """
+    Ucitava RDNS_h1 ili RDNS_h6 sheet i vraca prognoze u istom redosledu
+    rocnosti kao RF/XGBoost matrice.
+    """
+
+    raw_sheet = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        engine="openpyxl"
+    )
+
+    raw_sheet.columns = [
+        str(column).strip()
+        for column in raw_sheet.columns
+    ]
+
+    origin_column = _find_required_column(
+        raw_sheet.columns,
+        ["Forecast_origin", "Forecast origin", "Origin"]
+    )
+
+    target_column = _find_required_column(
+        raw_sheet.columns,
+        ["Target_date", "Target date", "Target"]
+    )
+
+    maturity_lookup = {
+        _maturity_key(column): column
+        for column in raw_sheet.columns
+    }
+
+    selected_maturity_columns = []
+    missing_maturities = []
+
+    for maturity_name in maturity_names:
+
+        key = _maturity_key(maturity_name)
+
+        if key not in maturity_lookup:
+            missing_maturities.append(str(maturity_name))
+
+        else:
+            selected_maturity_columns.append(maturity_lookup[key])
+
+    if missing_maturities:
+        raise KeyError(
+            f"U sheetu {sheet_name} nedostaju RDNS kolone za rocnosti: "
+            f"{missing_maturities}."
+        )
+
+    rdns_df = pd.DataFrame({
+        "Forecast_origin": _to_month_start(
+            raw_sheet[origin_column],
+            origin_column
+        ),
+        "Target_date": _to_month_start(
+            raw_sheet[target_column],
+            target_column
+        )
+    })
+
+    for maturity_name, source_column in zip(
+        maturity_names,
+        selected_maturity_columns
+    ):
+        rdns_df[str(maturity_name)] = pd.to_numeric(
+            raw_sheet[source_column],
+            errors="coerce"
+        )
+
+    maturity_name_strings = [
+        str(maturity_name)
+        for maturity_name in maturity_names
+    ]
+
+    if rdns_df[maturity_name_strings].isna().any().any():
+        raise ValueError(
+            f"Sheet {sheet_name} sadrzi nedostajuce ili nenumericke "
+            "RDNS prognoze."
+        )
+
+    if rdns_df["Target_date"].duplicated().any():
+        duplicated_targets = (
+            rdns_df.loc[
+                rdns_df["Target_date"].duplicated(keep=False),
+                "Target_date"
+            ]
+            .dt.strftime("%Y-%m")
+            .unique()
+            .tolist()
+        )
+
+        raise ValueError(
+            f"Sheet {sheet_name} ima duplirane target datume: "
+            f"{duplicated_targets}."
+        )
+
+    return rdns_df.sort_values("Target_date").reset_index(drop=True)
+
+
+def align_rdns_with_rf_xgb_backtest(
+    backtest_result,
+    rdns_df,
+    data,
+    horizon,
+    maturity_names
+):
+    """
+    Poravnava RDNS prognoze sa RF/XGBoost prognozama po Target_date
+    i proverava da je Forecast_origin tacno Target_date - horizon.
+    """
+
+    target_dates = _to_month_start(
+        backtest_result["dates"],
+        "RF/XGBoost target dates"
+    )
+
+    expected_origin_dates = (
+        target_dates.to_period("M") - horizon
+    ).to_timestamp()
+
+    available_data_periods = set(
+        data.index.to_period("M")
+    )
+
+    missing_origin_periods = [
+        period
+        for period in expected_origin_dates.to_period("M")
+        if period not in available_data_periods
+    ]
+
+    if missing_origin_periods:
+        raise ValueError(
+            "Neki ocekivani forecast origin datumi nisu prisutni u RF/XGB "
+            f"bazi: {missing_origin_periods[:5]}."
+        )
+
+    expected_dates_df = pd.DataFrame({
+        "Target_date": target_dates,
+        "Expected_Forecast_origin": expected_origin_dates,
+        "Backtest_position": np.arange(len(target_dates))
+    })
+
+    extra_rdns_targets = rdns_df.loc[
+        ~rdns_df["Target_date"].isin(expected_dates_df["Target_date"]),
+        "Target_date"
+    ]
+
+    if len(extra_rdns_targets) > 0:
+        print(
+            f"Upozorenje: RDNS h={horizon} ima target datume koji nisu "
+            "u RF/XGBoost backtest-u i bice ignorisani: "
+            f"{extra_rdns_targets.dt.strftime('%Y-%m').tolist()[:10]}"
+        )
+
+    aligned = expected_dates_df.merge(
+        rdns_df,
+        on="Target_date",
+        how="left",
+        sort=True
+    )
+
+    missing_rdns_targets = aligned.loc[
+        aligned["Forecast_origin"].isna(),
+        "Target_date"
+    ]
+
+    if len(missing_rdns_targets) > 0:
+        raise ValueError(
+            f"RDNS h={horizon} nema prognoze za sledece target datume: "
+            f"{missing_rdns_targets.dt.strftime('%Y-%m').tolist()[:10]}."
+        )
+
+    origin_matches = (
+        aligned["Forecast_origin"].dt.to_period("M")
+        == aligned["Expected_Forecast_origin"].dt.to_period("M")
+    )
+
+    if not origin_matches.all():
+        mismatches = aligned.loc[
+            ~origin_matches,
+            [
+                "Target_date",
+                "Expected_Forecast_origin",
+                "Forecast_origin"
+            ]
+        ].copy()
+
+        for column in [
+            "Target_date",
+            "Expected_Forecast_origin",
+            "Forecast_origin"
+        ]:
+            mismatches[column] = mismatches[column].dt.strftime("%Y-%m")
+
+        raise ValueError(
+            f"RDNS h={horizon} Forecast_origin nije uskladjen sa "
+            "Target_date - horizon. Prvih nekoliko gresaka:\n"
+            f"{mismatches.head(10).to_string(index=False)}"
+        )
+
+    positions = aligned["Backtest_position"].astype(int).to_numpy()
+
+    maturity_name_strings = [
+        str(maturity_name)
+        for maturity_name in maturity_names
+    ]
+
+    alignment_table = aligned[
+        [
+            "Target_date",
+            "Expected_Forecast_origin",
+            "Forecast_origin"
+        ]
+    ].copy()
+
+    alignment_table["Target_date"] = (
+        alignment_table["Target_date"].dt.strftime("%Y-%m")
+    )
+
+    alignment_table["Expected_Forecast_origin"] = (
+        alignment_table["Expected_Forecast_origin"].dt.strftime("%Y-%m")
+    )
+
+    alignment_table["Forecast_origin"] = (
+        alignment_table["Forecast_origin"].dt.strftime("%Y-%m")
+    )
+
+    return {
+        "target_dates": pd.DatetimeIndex(aligned["Target_date"]),
+        "origin_dates": pd.DatetimeIndex(aligned["Forecast_origin"]),
+        "actual": np.asarray(backtest_result["actual"])[positions],
+        "rf": np.asarray(backtest_result["rf"])[positions],
+        "xgb": np.asarray(backtest_result["xgb"])[positions],
+        "rdns": aligned[maturity_name_strings].to_numpy(dtype=float),
+        "alignment_table": alignment_table
+    }
+
+
+def _holm_adjustment_allowing_nan(p_values):
+    """
+    Holm korekcija uz ocuvanje NaN p-vrednosti ako se neki DM test ne izracuna.
+    """
+
+    p_values = np.asarray(p_values, dtype=float)
+    adjusted = np.full_like(
+        p_values,
+        np.nan,
+        dtype=float
+    )
+
+    valid = np.isfinite(p_values)
+
+    if valid.any():
+        adjusted[valid] = holm_adjustment(
+            p_values[valid]
+        )
+
+    return adjusted
+
+
+def evaluate_dm_pair(
+    aligned_result,
+    horizon,
+    maturity_names,
+    model_1_key,
+    model_2_key,
+    model_1_label,
+    model_2_label
+):
+    """
+    DM test za dva proizvoljna modela iz aligned_result recnika.
+
+    Znak DM statistike:
+      DM > 0  -> model_2 ima manji prosecan gubitak;
+      DM < 0  -> model_1 ima manji prosecan gubitak.
+    """
+
+    actual = aligned_result["actual"]
+    model_1_prediction = aligned_result[model_1_key]
+    model_2_prediction = aligned_result[model_2_key]
+
+    error_model_1 = actual - model_1_prediction
+    error_model_2 = actual - model_2_prediction
+
+    overall_rmse_model_1 = np.sqrt(
+        np.mean(error_model_1 ** 2)
+    )
+
+    overall_rmse_model_2 = np.sqrt(
+        np.mean(error_model_2 ** 2)
+    )
+
+    curve_loss_model_1 = np.mean(
+        error_model_1 ** 2,
+        axis=1
+    )
+
+    curve_loss_model_2 = np.mean(
+        error_model_2 ** 2,
+        axis=1
+    )
+
+    curve_dm = modified_dm_test(
+        loss_rf=curve_loss_model_1,
+        loss_xgb=curve_loss_model_2,
+        forecast_horizon=horizon
+    )
+
+    if np.isnan(curve_dm["p_value"]):
+        curve_conclusion = "Test statistic could not be calculated"
+
+    elif curve_dm["p_value"] >= 0.05:
+        curve_conclusion = "No statistically significant difference"
+
+    elif curve_dm["dm_statistic"] > 0:
+        curve_conclusion = (
+            f"{model_2_label} has significantly lower forecast loss"
+        )
+
+    else:
+        curve_conclusion = (
+            f"{model_1_label} has significantly lower forecast loss"
+        )
+
+    summary = {
+        "Comparison": f"{model_1_label} vs {model_2_label}",
+        "Horizon": horizon,
+        "Number_of_forecasts": len(actual),
+        "Model_1": model_1_label,
+        "Model_2": model_2_label,
+        "Model_1_RMSE": overall_rmse_model_1,
+        "Model_2_RMSE": overall_rmse_model_2,
+        "Mean_loss_difference_Model_1_minus_Model_2": (
+            curve_dm["mean_loss_difference"]
+        ),
+        "DM_statistic": curve_dm["dm_statistic"],
+        "DM_p_value": curve_dm["p_value"],
+        "Conclusion": curve_conclusion
+    }
+
+    maturity_rows = []
+
+    for maturity_index, maturity_name in enumerate(maturity_names):
+
+        loss_model_1_maturity = (
+            error_model_1[:, maturity_index] ** 2
+        )
+
+        loss_model_2_maturity = (
+            error_model_2[:, maturity_index] ** 2
+        )
+
+        maturity_dm = modified_dm_test(
+            loss_rf=loss_model_1_maturity,
+            loss_xgb=loss_model_2_maturity,
+            forecast_horizon=horizon
+        )
+
+        maturity_rows.append({
+            "Maturity": maturity_name,
+            "Model_1": model_1_label,
+            "Model_2": model_2_label,
+            "Model_1_RMSE": np.sqrt(
+                np.mean(loss_model_1_maturity)
+            ),
+            "Model_2_RMSE": np.sqrt(
+                np.mean(loss_model_2_maturity)
+            ),
+            "Mean_loss_difference_Model_1_minus_Model_2": (
+                maturity_dm["mean_loss_difference"]
+            ),
+            "DM_statistic": maturity_dm["dm_statistic"],
+            "p_value_raw": maturity_dm["p_value"]
+        })
+
+    maturity_table = pd.DataFrame(maturity_rows)
+
+    maturity_table["p_value_Holm"] = _holm_adjustment_allowing_nan(
+        maturity_table["p_value_raw"].values
+    )
+
+    maturity_conclusions = []
+
+    for _, row in maturity_table.iterrows():
+
+        if not np.isfinite(row["p_value_Holm"]):
+            conclusion = "Test statistic could not be calculated"
+
+        elif row["p_value_Holm"] >= 0.05:
+            conclusion = "No significant difference"
+
+        elif row["DM_statistic"] > 0:
+            conclusion = model_2_label
+
+        else:
+            conclusion = model_1_label
+
+        maturity_conclusions.append(conclusion)
+
+    maturity_table["Significantly_better_model"] = maturity_conclusions
+
+    return summary, maturity_table
+
+
+# -------------------------------------------------------------------------
+# 1. UCITAVANJE I PROVERA RDNS SHEETOVA
+# -------------------------------------------------------------------------
+
+maturity_names_for_rdns = [
+    str(maturity_name)
+    for maturity_name in maturity_cols
+]
+
+rdns_sheet_by_horizon = {
+    1: "RDNS_h1",
+    6: "RDNS_h6"
+}
+
+rdns_aligned_results = {}
+rdns_alignment_tables = {}
+
+for horizon, sheet_name in rdns_sheet_by_horizon.items():
+
+    rdns_forecast_df = load_rdns_forecast_sheet(
+        file_path=rdns_forecast_file,
+        sheet_name=sheet_name,
+        maturity_names=maturity_names_for_rdns
+    )
+
+    rdns_aligned_results[horizon] = align_rdns_with_rf_xgb_backtest(
+        backtest_result=backtest_results[horizon],
+        rdns_df=rdns_forecast_df,
+        data=df,
+        horizon=horizon,
+        maturity_names=maturity_names_for_rdns
+    )
+
+    rdns_alignment_tables[horizon] = (
+        rdns_aligned_results[horizon]["alignment_table"]
+    )
+
+    print(
+        "\nRDNS poravnanje h="
+        f"{horizon}: "
+        f"{len(rdns_aligned_results[horizon]['target_dates'])} prognoza, "
+        "target "
+        f"{rdns_alignment_tables[horizon]['Target_date'].iloc[0]} do "
+        f"{rdns_alignment_tables[horizon]['Target_date'].iloc[-1]}, "
+        "origin "
+        f"{rdns_alignment_tables[horizon]['Forecast_origin'].iloc[0]} do "
+        f"{rdns_alignment_tables[horizon]['Forecast_origin'].iloc[-1]}."
+    )
+
+
+# -------------------------------------------------------------------------
+# 2. DM TEST: RF VS RDNS I XGBOOST VS RDNS
+# -------------------------------------------------------------------------
+
+rdns_summary_rows = []
+rdns_maturity_dm_tables = {}
+
+model_comparisons = [
+    ("rf", "rdns", "Random Forest", "RDNS", "RF_vs_RDNS"),
+    ("xgb", "rdns", "XGBoost", "RDNS", "XGB_vs_RDNS")
+]
+
+for horizon in (1, 6):
+
+    for (
+        model_1_key,
+        model_2_key,
+        model_1_label,
+        model_2_label,
+        comparison_key
+    ) in model_comparisons:
+
+        summary, maturity_table = evaluate_dm_pair(
+            aligned_result=rdns_aligned_results[horizon],
+            horizon=horizon,
+            maturity_names=maturity_names_for_rdns,
+            model_1_key=model_1_key,
+            model_2_key=model_2_key,
+            model_1_label=model_1_label,
+            model_2_label=model_2_label
+        )
+
+        rdns_summary_rows.append(summary)
+        rdns_maturity_dm_tables[
+            f"{comparison_key}_h{horizon}"
+        ] = maturity_table
+
+        print("\n" + "=" * 80)
+        print(
+            f"DIEBOLD-MARIANO TEST: "
+            f"{model_1_label.upper()} VS {model_2_label.upper()}, "
+            f"h={horizon}"
+        )
+        print("=" * 80)
+
+        print(
+            f"Broj prognoza: "
+            f"{summary['Number_of_forecasts']}"
+        )
+
+        print(
+            f"{model_1_label} RMSE: "
+            f"{summary['Model_1_RMSE']:.6f}"
+        )
+
+        print(
+            f"{model_2_label} RMSE: "
+            f"{summary['Model_2_RMSE']:.6f}"
+        )
+
+        print(
+            "Srednja razlika gubitaka "
+            f"({model_1_label} - {model_2_label}): "
+            f"{summary['Mean_loss_difference_Model_1_minus_Model_2']:.6f}"
+        )
+
+        print(
+            f"DM statistika: "
+            f"{summary['DM_statistic']:.6f}"
+        )
+
+        print(
+            f"p-vrednost: "
+            f"{summary['DM_p_value']:.6f}"
+        )
+
+        print(
+            f"Zakljucak: "
+            f"{summary['Conclusion']}"
+        )
+
+        print("\nRezultati po rocnostima:")
+        print(
+            maturity_table.to_string(
+                index=False,
+                float_format=lambda value: f"{value:.6f}"
+            )
+        )
+
+
+rdns_dm_summary_df = pd.DataFrame(rdns_summary_rows)
+
+print("\n" + "=" * 80)
+print("SAZETAK DM TESTA: RF/XGBOOST VS RDNS")
+print("=" * 80)
+
+print(
+    rdns_dm_summary_df.to_string(
+        index=False,
+        float_format=lambda value: f"{value:.6f}"
+    )
+)
+
+
+with pd.ExcelWriter(
+    "DM_RF_XGBoost_vs_RDNS_results.xlsx",
+    engine="openpyxl"
+) as writer:
+
+    rdns_dm_summary_df.to_excel(
+        writer,
+        sheet_name="Whole_curve",
+        index=False
+    )
+
+    rdns_alignment_tables[1].to_excel(
+        writer,
+        sheet_name="Alignment_h1",
+        index=False
+    )
+
+    rdns_alignment_tables[6].to_excel(
+        writer,
+        sheet_name="Alignment_h6",
+        index=False
+    )
+
+    for sheet_name, maturity_table in rdns_maturity_dm_tables.items():
+
+        maturity_table.to_excel(
+            writer,
+            sheet_name=sheet_name,
+            index=False
+        )
+
+print(
+    "\nRezultati RF/RDNS i XGBoost/RDNS DM testova su sacuvani u fajlu "
+    "'DM_RF_XGBoost_vs_RDNS_results.xlsx'."
+)
+
+
+
+
+
